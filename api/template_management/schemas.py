@@ -1,140 +1,101 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-from enum import Enum
+# api/template_management/schemas.py
+from pydantic import BaseModel, Field
+from typing import Optional
 
-class TemplateType(str, Enum):
-    CDA = "CDA"
-    HL7 = "HL7"
-    FHIR = "FHIR"
-    CUSTOM = "Custom"
-
-class TemplateAction(str, Enum):
-    DOWNLOAD = "download"
-    VALIDATE = "validate"
-    TRANSFORM = "transform"
-    VIEW = "view"
-
-class TemplateBase(BaseModel):
-    name: str = Field(..., min_length=3, max_length=200, description="Template name")
-    description: Optional[str] = Field(None, description="Template description")
-    template_type: TemplateType = Field(..., description="Type of template")
-    version: str = Field(default="1.0", description="Template version")
-    is_active: bool = Field(default=True, description="Is template active")
-    
-    @field_validator('name')
-    @classmethod
-    def validate_name(cls, v):
-        if not v.strip():
-            raise ValueError('Template name cannot be empty')
-        return v.strip()
-    
-    @field_validator('version')
-    @classmethod
-    def validate_version(cls, v):
-        # Simple version validation (X.Y.Z format)
-        parts = v.split('.')
-        if len(parts) < 2 or len(parts) > 3:
-            raise ValueError('Version must be in format X.Y or X.Y.Z')
-        return v
-
-class TemplateCreate(TemplateBase):
-    tags: Optional[List[str]] = Field(None, description="Template tags for categorization")
-
-class TemplateUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    template_type: Optional[TemplateType] = None
-    version: Optional[str] = None
-    is_active: Optional[bool] = None
-
-class TemplateResponse(TemplateBase):
-    id: int
-    file_url: Optional[str] = None
-    file_name: Optional[str] = None
-    file_size: Optional[int] = None
-    mime_type: Optional[str] = None
-    created_by: Optional[int] = None
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-    last_used_at: Optional[datetime] = None
-    usage_count: int = 0
-    tags: Optional[List[str]] = []
+class TemplateValidateRequest(BaseModel):
+    """Schema for validating Liquid template syntax"""
+    content: str = Field(..., min_length=1, description="Liquid template content to validate")
     
     class Config:
-        from_attributes = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
+        schema_extra = {
+            "example": {
+                "content": "{% assign patient = source.patient %}\n{\n  \"resourceType\": \"Patient\"\n}"
+            }
+        }
+
+class TemplateResponse(BaseModel):
+    """Schema for template response"""
+    id: int
+    template_name: str
+    hie_source: str
+    source_type: str
+    azure_storage_path: str
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "template_name": "patient_mapping.liquid",
+                "hie_source": "Hospital_XYZ",
+                "source_type": "HL7",
+                "azure_storage_path": "fhir-templates/Hospital_XYZ/patient_mapping.liquid"
+            }
         }
 
 class TemplateListResponse(BaseModel):
-    total: int
-    templates: List[TemplateResponse]
-    page: int = 1
-    page_size: int = 50
-
-class TemplateVersionResponse(BaseModel):
+    """Schema for listing templates"""
     id: int
-    template_id: int
-    version: str
-    file_url: Optional[str]
-    change_description: Optional[str]
-    created_by: Optional[int]
-    created_at: datetime
+    template_name: str
+    hie_source: str
+    source_type: str
+    azure_storage_path: str
     
     class Config:
-        from_attributes = True
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "template_name": "patient_mapping.liquid",
+                "hie_source": "Hospital_XYZ",
+                "source_type": "HL7",
+                "azure_storage_path": "fhir-templates/Hospital_XYZ/patient_mapping.liquid"
+            }
+        }
 
-class TemplateUsageLogResponse(BaseModel):
-    id: int
-    template_id: int
-    user_id: Optional[int]
-    action: str
-    timestamp: datetime
-    ip_address: Optional[str]
+class TemplateContentResponse(BaseModel):
+    """Schema for returning template content"""
+    template_name: str
+    content: str
     
     class Config:
-        from_attributes = True
-
-class TemplateStatistics(BaseModel):
-    total_templates: int
-    active_templates: int
-    inactive_templates: int
-    templates_by_type: Dict[str, int]
-    most_used_templates: List[Dict[str, Any]]
-    recent_uploads: List[Dict[str, Any]]
-
-class TemplateValidationRequest(BaseModel):
-    template_id: int
-    data: Dict[str, Any] = Field(..., description="Data to validate against template")
+        schema_extra = {
+            "example": {
+                "template_name": "patient_mapping.liquid",
+                "content": "{% assign patient = source.patient %}\n{\n  \"resourceType\": \"Patient\"\n}"
+            }
+        }
 
 class TemplateValidationResponse(BaseModel):
+    """Schema for template validation response"""
     valid: bool
-    errors: List[str] = []
-    warnings: List[str] = []
-    template_name: str
-    template_version: str
+    message: str
+    errors: Optional[list] = None
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "valid": True,
+                "message": "Template syntax is valid",
+                "errors": None
+            }
+        }
 
-class TemplateTransformRequest(BaseModel):
-    source_template_id: int
-    target_template_id: int
-    data: Dict[str, Any] = Field(..., description="Data to transform")
-
-class TemplateTransformResponse(BaseModel):
+class SuccessResponse(BaseModel):
+    """Generic success response"""
     success: bool
-    transformed_data: Optional[Dict[str, Any]] = None
-    errors: List[str] = []
-    source_template: str
-    target_template: str
+    message: str
+    data: Optional[dict] = None
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Template uploaded successfully",
+                "data": {"id": 1, "template_name": "patient_mapping.liquid"}
+            }
+        }
 
-class TemplateSearchRequest(BaseModel):
-    query: Optional[str] = None
-    template_type: Optional[TemplateType] = None
-    is_active: Optional[bool] = None
-    tags: Optional[List[str]] = None
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=50, ge=1, le=100)
-
-class BulkTemplateActivateRequest(BaseModel):
-    template_ids: List[int]
-    is_active: bool
+class TemplateQueryParams(BaseModel):
+    """Query parameters for filtering templates"""
+    hie_source: Optional[str] = None
+    source_type: Optional[str] = None
+    template_name: Optional[str] = None

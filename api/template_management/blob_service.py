@@ -1,366 +1,273 @@
+# api/template_management/blob_service.py
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
-from azure.core.exceptions import (
-    AzureError, 
-    ResourceNotFoundError, 
-    ResourceExistsError,
-    ClientAuthenticationError,
-    ServiceRequestError
-)
+from azure.core.exceptions import AzureError, ResourceNotFoundError
+from urllib.parse import urlparse
 from config import settings
-from common.exceptions import StorageException, NotFoundException, BadRequestException, ConnectionException
-from typing import Optional, List, Dict
+from common.exceptions import StorageException
 import logging
+from typing import Optional,List
 
 logger = logging.getLogger(__name__)
 
 class AzureBlobStorageService:
-    """
-    Azure Blob Storage Service with comprehensive error handling
-    """
+    """Service for managing files in Azure Blob Storage"""
     
-    def __init__(self):
-        self.blob_service_client = None
-        self.container_name = settings.AZURE_CONTAINER_NAME
-        self._initialize_client()
-    
-    def _initialize_client(self):
-        """Initialize Azure Blob Storage client with error handling"""
+    def __init__(self, container_type: str = "liquid"):
+        """
+        Initialize blob service using connection string
+        
+        Args:
+            container_type: 'liquid' for templates, 'input' for input files
+        """
         try:
-            if not settings.AZURE_STORAGE_CONNECTION_STRING:
-                raise StorageException("Azure Storage connection string not configured")
+            # Get connection string from config
+            connection_string = settings.BLOB_CONNECTION_STRING
             
-            self.blob_service_client = BlobServiceClient.from_connection_string(
-                settings.AZURE_STORAGE_CONNECTION_STRING
-            )
+            logger.info(f"🔗 Connecting to blob storage (container type: {container_type})")
+            
+            # Create BlobServiceClient from connection string
+            self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+            
+            # Get container name based on type
+            if container_type == "liquid":
+                self.container_name = settings.get_liquid_container()
+            elif container_type == "input":
+                self.container_name = settings.get_input_container()
+            else:
+                raise ValueError(f"Invalid container_type: {container_type}")
+            
+            self.container_type = container_type
+            
+            logger.info(f"✅ Blob service initialized for container: {self.container_name}")
             
             # Ensure container exists
             self._ensure_container_exists()
             
-            logger.info("✅ Azure Blob Storage client initialized successfully")
-            
-        except ClientAuthenticationError as e:
-            logger.error(f"Azure Blob Storage authentication failed: {e}")
-            raise StorageException("Storage authentication failed. Check your credentials.")
-        
-        except ValueError as e:
-            logger.error(f"Invalid Azure Storage connection string: {e}")
-            raise StorageException("Invalid storage connection string configuration")
-        
         except Exception as e:
-            logger.error(f"Failed to initialize Azure Blob Storage: {e}")
+            logger.error(f"❌ Failed to initialize Azure Blob Storage: {e}")
             raise StorageException(f"Storage initialization failed: {str(e)}")
     
     def _ensure_container_exists(self):
-        """Ensure the container exists, create if it doesn't"""
+        """Create container if it doesn't exist"""
         try:
             container_client = self.blob_service_client.get_container_client(self.container_name)
-            
-            # Check if container exists
             if not container_client.exists():
-                logger.info(f"Container '{self.container_name}' does not exist. Creating...")
                 container_client.create_container()
-                logger.info(f"✅ Container '{self.container_name}' created successfully")
-            else:
-                logger.info(f"✅ Container '{self.container_name}' already exists")
-                
-        except ResourceExistsError:
-            logger.info(f"Container '{self.container_name}' already exists")
-        
-        except ClientAuthenticationError as e:
-            logger.error(f"Authentication error creating container: {e}")
-            raise StorageException("Cannot create container: authentication failed")
-        
+                logger.info(f"Created container: {self.container_name}")
         except Exception as e:
             logger.error(f"Error ensuring container exists: {e}")
-            raise StorageException(f"Container verification failed: {str(e)}")
+            raise StorageException(f"Container setup failed: {str(e)}")
     
-    def upload_file(self, file_name: str, file_content: bytes) -> str:
+    def upload_template_with_path(self, blob_path: str, content: str) -> str:
         """
-        Upload file to Azure Blob Storage
+        Upload or update a Liquid template to Azure Blob Storage with custom path
         
         Args:
-            file_name: Name of the file
-            file_content: File content as bytes
+            blob_path: Full blob path (e.g., "Hl7v2/SIU_S15.liquid")
+            content: Template content as string
             
         Returns:
-            URL of the uploaded blob
-            
-        Raises:
-            StorageException: If upload fails
+            Full Azure Blob URL
         """
         try:
-            if not file_name:
-                raise BadRequestException("File name cannot be empty")
-            
-            if not file_content or len(file_content) == 0:
-                raise BadRequestException("File content cannot be empty")
-            
-            # Sanitize file name
-            sanitized_name = self._sanitize_filename(file_name)
-            
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name,
-                blob=sanitized_name
+                blob=blob_path
             )
             
-            # Upload with overwrite
-            blob_client.upload_blob(file_content, overwrite=True)
+            # Upload with overwrite - FIX: Use ContentSettings object
+            from azure.storage.blob import ContentSettings
             
-            blob_url = blob_client.url
-            logger.info(f"✅ File uploaded successfully: {sanitized_name}")
+            blob_client.upload_blob(
+                content.encode('utf-8'),
+                overwrite=True,
+                content_settings=ContentSettings(content_type='text/plain')  # Fixed
+            )
             
-            return blob_url
+            # Return full blob URL
+            full_url = blob_client.url
+            logger.info(f"Successfully uploaded template: {full_url}")
             
-        except BadRequestException:
-            raise
-        
-        except ClientAuthenticationError as e:
-            logger.error(f"Authentication error during upload: {e}")
-            raise StorageException("Upload failed: authentication error")
-        
-        except ServiceRequestError as e:
-            logger.error(f"Network error during upload: {e}")
-            raise ConnectionException("Upload failed: network error")
-        
+            return full_url
+            
         except AzureError as e:
-            logger.error(f"Azure error during upload: {e}")
-            raise StorageException(f"Upload failed: {str(e)}")
-        
+            logger.error(f"Azure Storage error uploading template: {e}")
+            raise StorageException(f"Failed to upload template: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error during upload: {e}")
-            raise StorageException(f"Upload failed: {str(e)}")
+            logger.error(f"Unexpected error uploading template: {e}")
+            raise StorageException(f"Template upload failed: {str(e)}")
     
-    def download_file(self, blob_name: str) -> bytes:
+    def download_template_by_path(self, azure_storage_path: str) -> str:
         """
-        Download file from Azure Blob Storage
+        Download a Liquid template from Azure Blob Storage using full blob URL
         
         Args:
-            blob_name: Name of the blob
+            azure_storage_path: Full Azure blob URL
             
         Returns:
-            File content as bytes
-            
-        Raises:
-            NotFoundException: If file not found
-            StorageException: If download fails
+            Template content as string
         """
         try:
-            if not blob_name:
-                raise BadRequestException("Blob name cannot be empty")
+            # Extract blob name from full URL
+            # URL format: https://{account}.blob.core.windows.net/{container}/{blob_path}
+            from urllib.parse import urlparse
             
+            parsed_url = urlparse(azure_storage_path)
+            path_parts = parsed_url.path.strip('/').split('/', 1)
+            
+            if len(path_parts) < 2:
+                raise StorageException(f"Invalid blob URL format: {azure_storage_path}")
+            
+            blob_path = path_parts[1]  # Get blob path after container name
+            
+            # Use authenticated blob service client
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name,
-                blob=blob_name
+                blob=blob_path
             )
             
-            # Check if blob exists
-            if not blob_client.exists():
-                raise NotFoundException(f"File not found in storage: {blob_name}")
+            # Download blob content
+            blob_data = blob_client.download_blob()
+            content = blob_data.readall().decode('utf-8')
             
-            # Download blob
-            download_stream = blob_client.download_blob()
-            file_content = download_stream.readall()
+            logger.info(f"Successfully downloaded template: {blob_path}")
+            return content
             
-            logger.info(f"✅ File downloaded successfully: {blob_name}")
-            return file_content
-            
-        except NotFoundException:
-            raise
-        
-        except BadRequestException:
-            raise
-        
-        except ResourceNotFoundError as e:
-            logger.error(f"Blob not found: {e}")
-            raise NotFoundException(f"File not found: {blob_name}")
-        
-        except ClientAuthenticationError as e:
-            logger.error(f"Authentication error during download: {e}")
-            raise StorageException("Download failed: authentication error")
-        
-        except ServiceRequestError as e:
-            logger.error(f"Network error during download: {e}")
-            raise ConnectionException("Download failed: network error")
-        
+        except ResourceNotFoundError:
+            logger.warning(f"Template not found: {azure_storage_path}")
+            raise StorageException(f"Template not found in storage")
         except AzureError as e:
-            logger.error(f"Azure error during download: {e}")
-            raise StorageException(f"Download failed: {str(e)}")
-        
+            logger.error(f"Azure Storage error downloading template: {e}")
+            raise StorageException(f"Failed to download template: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error during download: {e}")
-            raise StorageException(f"Download failed: {str(e)}")
+            logger.error(f"Unexpected error downloading template: {e}")
+            raise StorageException(f"Template download failed: {str(e)}")
     
-    def delete_file(self, blob_name: str) -> bool:
+    def delete_template_by_path(self, azure_storage_path: str) -> bool:
         """
-        Delete file from Azure Blob Storage
+        Delete a Liquid template from Azure Blob Storage using full blob URL
         
         Args:
-            blob_name: Name of the blob
+            azure_storage_path: Full Azure blob URL
             
         Returns:
-            True if deleted successfully
-            
-        Raises:
-            StorageException: If deletion fails
+            True if successful
         """
         try:
-            if not blob_name:
-                raise BadRequestException("Blob name cannot be empty")
+            # Extract blob name from full URL
+            from urllib.parse import urlparse
             
+            parsed_url = urlparse(azure_storage_path)
+            path_parts = parsed_url.path.strip('/').split('/', 1)
+            
+            if len(path_parts) < 2:
+                raise StorageException(f"Invalid blob URL format: {azure_storage_path}")
+            
+            blob_path = path_parts[1]  # Get blob path after container name
+            
+            # Use authenticated blob service client
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name,
-                blob=blob_name
+                blob=blob_path
             )
-            
-            # Check if blob exists
-            if not blob_client.exists():
-                logger.warning(f"Blob does not exist, skipping deletion: {blob_name}")
-                return True
             
             blob_client.delete_blob()
-            logger.info(f"✅ File deleted successfully: {blob_name}")
+            logger.info(f"Successfully deleted template: {blob_path}")
+            
             return True
             
-        except BadRequestException:
-            raise
-        
         except ResourceNotFoundError:
-            logger.warning(f"Blob not found during deletion: {blob_name}")
-            return True
-        
-        except ClientAuthenticationError as e:
-            logger.error(f"Authentication error during deletion: {e}")
-            raise StorageException("Deletion failed: authentication error")
-        
+            logger.warning(f"Template not found for deletion: {azure_storage_path}")
+            raise StorageException(f"Template not found")
         except AzureError as e:
-            logger.error(f"Azure error during deletion: {e}")
-            raise StorageException(f"Deletion failed: {str(e)}")
-        
+            logger.error(f"Azure Storage error deleting template: {e}")
+            raise StorageException(f"Failed to delete template: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error during deletion: {e}")
-            raise StorageException(f"Deletion failed: {str(e)}")
+            logger.error(f"Unexpected error deleting template: {e}")
+            raise StorageException(f"Template deletion failed: {str(e)}")
     
-    def list_files(self, prefix: Optional[str] = None) -> List[Dict[str, any]]:
+    def list_templates(self, prefix: Optional[str] = None) -> list:
         """
-        List all files in the container
+        List all templates in the container with optional prefix
         
         Args:
-            prefix: Optional prefix to filter blobs
+            prefix: Optional prefix to filter blobs (e.g., "Hospital_XYZ/")
             
         Returns:
-            List of blob information dictionaries
-            
-        Raises:
-            StorageException: If listing fails
+            List of blob paths
         """
         try:
-            container_client = self.blob_service_client.get_container_client(self.container_name)
-            
-            blobs = []
-            for blob in container_client.list_blobs(name_starts_with=prefix):
-                blobs.append({
-                    "name": blob.name,
-                    "size": blob.size,
-                    "created_at": blob.creation_time.isoformat() if blob.creation_time else None,
-                    "modified_at": blob.last_modified.isoformat() if blob.last_modified else None,
-                    "content_type": blob.content_settings.content_type if blob.content_settings else None
-                })
-            
-            logger.info(f"✅ Listed {len(blobs)} files from storage")
-            return blobs
-            
-        except ClientAuthenticationError as e:
-            logger.error(f"Authentication error during listing: {e}")
-            raise StorageException("Listing failed: authentication error")
-        
-        except AzureError as e:
-            logger.error(f"Azure error during listing: {e}")
-            raise StorageException(f"Listing failed: {str(e)}")
-        
-        except Exception as e:
-            logger.error(f"Unexpected error during listing: {e}")
-            raise StorageException(f"Listing failed: {str(e)}")
-    
-    def get_blob_url(self, blob_name: str) -> str:
-        """
-        Get URL for a blob
-        
-        Args:
-            blob_name: Name of the blob
-            
-        Returns:
-            URL of the blob
-        """
-        try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=self.container_name,
-                blob=blob_name
+            container_client = self.blob_service_client.get_container_client(
+                self.container_name
             )
-            return blob_client.url
+            
+            if prefix:
+                blobs = container_client.list_blobs(name_starts_with=prefix)
+            else:
+                blobs = container_client.list_blobs()
+            
+            template_paths = [blob.name for blob in blobs if blob.name.endswith('.liquid')]
+            
+            logger.info(f"Found {len(template_paths)} templates in storage")
+            return template_paths
+            
+        except AzureError as e:
+            logger.error(f"Azure Storage error listing templates: {e}")
+            raise StorageException(f"Failed to list templates: {str(e)}")
         except Exception as e:
-            logger.error(f"Error getting blob URL: {e}")
-            raise StorageException(f"Failed to get blob URL: {str(e)}")
+            logger.error(f"Unexpected error listing templates: {e}")
+            raise StorageException(f"Template listing failed: {str(e)}")
     
-    def blob_exists(self, blob_name: str) -> bool:
+    def check_blob_exists(self, blob_path: str) -> bool:
         """
-        Check if blob exists
+        Check if a blob exists in Azure Blob Storage
         
         Args:
-            blob_name: Name of the blob
+            blob_path: Path to the blob (e.g., "HL7/Resource/_Organization.liquid")
             
         Returns:
-            True if blob exists
+            True if blob exists, False otherwise
         """
         try:
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name,
-                blob=blob_name
+                blob=blob_path
             )
             return blob_client.exists()
         except Exception as e:
             logger.error(f"Error checking blob existence: {e}")
             return False
-    
-    def get_storage_info(self) -> Dict[str, any]:
-        """Get information about storage configuration"""
+
+    def list_all_blobs_in_folder(self, folder_prefix: str) -> List[str]:
+        """
+        List all blobs in a specific folder
+        
+        Args:
+            folder_prefix: Folder path (e.g., "HL7/Resource/")
+            
+        Returns:
+            List of blob names
+        """
         try:
-            container_client = self.blob_service_client.get_container_client(self.container_name)
+            container_client = self.blob_service_client.get_container_client(
+                self.container_name
+            )
             
-            # Count blobs
-            blob_count = sum(1 for _ in container_client.list_blobs())
+            blobs = container_client.list_blobs(name_starts_with=folder_prefix)
+            blob_names = [blob.name for blob in blobs]
             
-            return {
-                "storage_type": "Azure Blob Storage",
-                "container_name": self.container_name,
-                "is_azure": True,
-                "file_count": blob_count,
-                "status": "connected"
-            }
+            return blob_names
         except Exception as e:
-            logger.error(f"Error getting storage info: {e}")
-            return {
-                "storage_type": "Azure Blob Storage",
-                "container_name": self.container_name,
-                "is_azure": True,
-                "file_count": 0,
-                "status": "error",
-                "error": str(e)
-            }
-    
-    def _sanitize_filename(self, filename: str) -> str:
-        """Sanitize filename for blob storage"""
-        # Remove or replace invalid characters
-        invalid_chars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|']
-        sanitized = filename
-        for char in invalid_chars:
-            sanitized = sanitized.replace(char, '_')
-        return sanitized
-    
+            logger.error(f"Error listing blobs in folder: {e}")
+            return []
+        
     def test_connection(self) -> bool:
         """Test Azure Blob Storage connection"""
         try:
-            container_client = self.blob_service_client.get_container_client(self.container_name)
-            container_client.exists()
+            container_client = self.blob_service_client.get_container_client(
+                self.container_name
+            )
+            container_client.get_container_properties()
             logger.info("✅ Azure Blob Storage connection test successful")
             return True
         except Exception as e:

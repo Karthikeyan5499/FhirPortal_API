@@ -1,472 +1,404 @@
-from database import get_db_connection
-from common.exceptions import (
-    DatabaseException, 
-    NotFoundException, 
-    BadRequestException,
-    ConflictException,
-    ValidationException
-)
-from typing import List, Optional, Dict, Any
-import logging
+# api/template_management/repository.py
 import pyodbc
+from typing import Optional, List, Dict
+from database import get_db_connection
+from common.exceptions import DatabaseException
+import logging
 
 logger = logging.getLogger(__name__)
 
 class TemplateRepository:
+    """Repository for database operations on TemplateConfig table"""
     
     @staticmethod
-    def get_all(
-        template_type: Optional[str] = None,
-        is_active: Optional[bool] = None,
-        page: int = 1,
-        page_size: int = 50,
-        search_query: Optional[str] = None
-    ):
-        """Get all templates with pagination and filtering - Full exception handling"""
-        try:
-            # Validate pagination parameters
-            if page < 1:
-                raise ValidationException("Page number must be >= 1")
-            if page_size < 1 or page_size > 100:
-                raise ValidationException("Page size must be between 1 and 100")
+    def create_template(hie_source: str, source_type: str, liquid_template: str, azure_storage_path: str) -> int:
+        """
+        Insert a new template record into the database
+        
+        Args:
+            hie_source: HIE source identifier
+            source_type: Source type (HL7, CDA, etc.)
+            liquid_template: Template name
+            azure_storage_path: Path in Azure Blob Storage
             
+        Returns:
+            ID of the newly created record
+        """
+        try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Build query
                 query = """
-                    SELECT t.id, t.name, t.description, t.template_type, t.version,
-                           t.file_url, t.is_active, t.created_at, t.updated_at
-                    FROM Templates t
-                    WHERE 1=1
+                    INSERT INTO dbo.TemplateConfig 
+                    (HieSource, SourceType, LiquidTemplate, AzureStoragePath)
+                    OUTPUT INSERTED.Id
+                    VALUES (?, ?, ?, ?)
                 """
-                params = []
+
+                cursor.execute(query, (hie_source, source_type, liquid_template, azure_storage_path))
+                result = cursor.fetchone()
+
+                if result is None:
+                    conn.commit()
+                    raise DatabaseException("Failed to retrieve inserted template ID")
+
+                template_id = int(result[0])
+                conn.commit()
+                logger.info(f"Created template record with ID: {template_id}")
                 
-                if template_type:
-                    query += " AND t.template_type = ?"
-                    params.append(template_type)
+                return template_id
                 
-                if is_active is not None:
-                    query += " AND t.is_active = ?"
-                    params.append(is_active)
-                
-                if search_query:
-                    query += " AND (t.name LIKE ? OR t.description LIKE ?)"
-                    search_term = f"%{search_query}%"
-                    params.extend([search_term, search_term])
-                
-                # Count total
-                try:
-                    count_query = f"SELECT COUNT(*) FROM ({query}) AS CountQuery"
-                    cursor.execute(count_query, params)
-                    total = cursor.fetchone()[0]
-                except pyodbc.Error as e:
-                    logger.error(f"Error counting templates: {e}")
-                    raise DatabaseException("Failed to count templates")
-                
-                # Add pagination
-                query += " ORDER BY t.created_at DESC"
-                query += f" OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
-                params.extend([(page - 1) * page_size, page_size])
-                
-                try:
-                    cursor.execute(query, params)
-                    rows = cursor.fetchall()
-                except pyodbc.Error as e:
-                    logger.error(f"Error fetching templates: {e}")
-                    raise DatabaseException("Failed to fetch templates")
-                
-                templates = []
-                for row in rows:
-                    try:
-                        template = dict(zip([column[0] for column in cursor.description], row))
-                        
-                        # Safely get tags
-                        template['tags'] = TemplateRepository._get_template_tags_safe(template['id'], conn)
-                        
-                        # Add default values
-                        template.setdefault('file_name', None)
-                        template.setdefault('file_size', None)
-                        template.setdefault('mime_type', None)
-                        template.setdefault('created_by', None)
-                        template.setdefault('last_used_at', None)
-                        template.setdefault('usage_count', 0)
-                        
-                        templates.append(template)
-                    except Exception as e:
-                        logger.warning(f"Error processing template row: {e}")
-                        continue
-                
-                logger.info(f"✅ Fetched {len(templates)} templates (page {page}/{(total + page_size - 1) // page_size})")
-                
-                return {
-                    "total": total,
-                    "templates": templates,
-                    "page": page,
-                    "page_size": page_size,
-                    "total_pages": (total + page_size - 1) // page_size
-                }
-                
-        except ValidationException:
-            raise
-        except DatabaseException:
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error in get_all: {e}", exc_info=True)
-            raise DatabaseException(f"Failed to fetch templates: {str(e)}")
+            logger.error(f"Error creating template record: {e}")
+            raise DatabaseException(f"Failed to create template: {str(e)}")
     
     @staticmethod
-    def _get_template_tags_safe(template_id: int, conn) -> List[str]:
-        """Get tags for a template - safe version with full error handling"""
+    def get_template_by_id(template_id: int) -> Optional[Dict]:
+        """
+        Retrieve a template record by ID
+        
+        Args:
+            template_id: ID of the template
+            
+        Returns:
+            Dictionary with template data or None
+        """
         try:
-            # Check if TemplateTags table exists
-            check_cursor = conn.cursor()
-            check_cursor.execute("""
-                SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-                WHERE TABLE_NAME = 'TemplateTags'
-            """)
-            table_exists = check_cursor.fetchone()[0] > 0
-            check_cursor.close()
-            
-            if not table_exists:
-                return []
-            
-            # Get tags
-            tag_cursor = conn.cursor()
-            tag_cursor.execute(
-                "SELECT tag_name FROM TemplateTags WHERE template_id = ?", 
-                (template_id,)
-            )
-            tags = [row[0] for row in tag_cursor.fetchall()]
-            tag_cursor.close()
-            
-            return tags
-            
-        except pyodbc.Error as e:
-            logger.warning(f"Database error fetching tags for template {template_id}: {e}")
-            return []
-        except Exception as e:
-            logger.warning(f"Unexpected error fetching tags for template {template_id}: {e}")
-            return []
-    
-    @staticmethod
-    def get_by_id(template_id: int):
-        """Get template by ID - Full exception handling"""
-        try:
-            if template_id < 1:
-                raise ValidationException("Template ID must be positive")
-            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Check what columns exist
-                try:
-                    cursor.execute("""
-                        SELECT COLUMN_NAME 
-                        FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'Templates'
-                    """)
-                    available_columns = [row[0] for row in cursor.fetchall()]
-                except pyodbc.Error as e:
-                    logger.error(f"Error checking table schema: {e}")
-                    raise DatabaseException("Failed to verify table structure")
-                
-                # Build query with available columns
-                base_columns = ['id', 'name', 'description', 'template_type', 'version', 'is_active', 'created_at', 'updated_at']
-                optional_columns = ['file_url', 'file_name', 'file_size', 'mime_type', 'created_by', 'last_used_at', 'usage_count']
-                
-                columns_to_select = base_columns + [col for col in optional_columns if col in available_columns]
-                
-                query = f"""
-                    SELECT {', '.join(columns_to_select)}
-                    FROM Templates
-                    WHERE id = ?
+                query = """
+                    SELECT Id, HieSource, SourceType, LiquidTemplate, AzureStoragePath
+                    FROM dbo.TemplateConfig
+                    WHERE Id = ?
                 """
                 
-                try:
-                    cursor.execute(query, (template_id,))
-                    row = cursor.fetchone()
-                except pyodbc.Error as e:
-                    logger.error(f"Error fetching template {template_id}: {e}")
-                    raise DatabaseException(f"Failed to fetch template")
+                cursor.execute(query, (template_id,))
+                row = cursor.fetchone()
                 
-                if not row:
-                    raise NotFoundException(f"Template with ID {template_id} not found")
+                if row:
+                    return {
+                        "id": row[0],
+                        "hie_source": row[1],
+                        "source_type": row[2],
+                        "template_name": row[3],
+                        "azure_storage_path": row[4]
+                    }
                 
-                template = dict(zip(columns_to_select, row))
+                return None
                 
-                # Add default values for missing columns
-                for col in optional_columns:
-                    if col not in template:
-                        template[col] = None if col != 'usage_count' else 0
-                
-                # Get tags
-                template['tags'] = TemplateRepository._get_template_tags_safe(template_id, conn)
-                
-                logger.info(f"✅ Fetched template {template_id}")
-                return template
-                
-        except NotFoundException:
-            raise
-        except ValidationException:
-            raise
-        except DatabaseException:
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error in get_by_id: {e}", exc_info=True)
+            logger.error(f"Error fetching template by ID: {e}")
             raise DatabaseException(f"Failed to fetch template: {str(e)}")
     
     @staticmethod
-    def create(template_data: dict, user_id: int):
-        """Create new template - Full exception handling"""
-        try:
-            # Validate input
-            if not template_data.get('name'):
-                raise ValidationException("Template name is required")
-            if not template_data.get('template_type'):
-                raise ValidationException("Template type is required")
+    def get_templates_by_name(template_name: str, hie_source: Optional[str] = None) -> List[Dict]:
+        """
+        Retrieve all template records with the same name (possibly across different sources)
+        
+        Args:
+            template_name: Name of the template
+            hie_source: Optional filter by HIE source
             
+        Returns:
+            List of dictionaries with template data
+        """
+        try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Check for duplicate
-                try:
-                    cursor.execute("""
-                        SELECT id FROM Templates 
-                        WHERE name = ? AND version = ?
-                    """, (template_data['name'], template_data.get('version', '1.0')))
-                    
-                    if cursor.fetchone():
-                        raise ConflictException(
-                            f"Template '{template_data['name']}' version '{template_data.get('version', '1.0')}' already exists"
-                        )
-                except pyodbc.Error as e:
-                    if "duplicate" in str(e).lower():
-                        raise ConflictException("Template with this name and version already exists")
-                    logger.error(f"Error checking for duplicate: {e}")
-                    raise DatabaseException("Failed to check for duplicate templates")
+                if hie_source:
+                    query = """
+                        SELECT Id, HieSource, SourceType, LiquidTemplate, AzureStoragePath
+                        FROM dbo.TemplateConfig
+                        WHERE LiquidTemplate = ? AND HieSource = ?
+                        ORDER BY Id DESC
+                    """
+                    cursor.execute(query, (template_name, hie_source))
+                else:
+                    query = """
+                        SELECT Id, HieSource, SourceType, LiquidTemplate, AzureStoragePath
+                        FROM dbo.TemplateConfig
+                        WHERE LiquidTemplate = ?
+                        ORDER BY Id DESC
+                    """
+                    cursor.execute(query, (template_name,))
                 
-                # Check available columns
-                try:
-                    cursor.execute("""
-                        SELECT COLUMN_NAME 
-                        FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'Templates'
-                    """)
-                    available_columns = [row[0] for row in cursor.fetchall()]
-                except pyodbc.Error as e:
-                    logger.error(f"Error checking table schema: {e}")
-                    raise DatabaseException("Failed to verify table structure")
+                rows = cursor.fetchall()
                 
-                # Build INSERT
-                insert_columns = ['name', 'description', 'template_type', 'version', 'is_active']
-                insert_values = [
-                    template_data['name'],
-                    template_data.get('description'),
-                    template_data['template_type'],
-                    template_data.get('version', '1.0'),
-                    template_data.get('is_active', True)
-                ]
+                templates = []
+                for row in rows:
+                    templates.append({
+                        "id": row[0],
+                        "hie_source": row[1],
+                        "source_type": row[2],
+                        "template_name": row[3],
+                        "azure_storage_path": row[4]
+                    })
                 
-                if 'created_by' in available_columns:
-                    insert_columns.append('created_by')
-                    insert_values.append(user_id)
+                return templates
                 
-                placeholders = ', '.join(['?' for _ in insert_values])
+        except Exception as e:
+            logger.error(f"Error fetching templates by name: {e}")
+            raise DatabaseException(f"Failed to fetch templates: {str(e)}")
+    
+    @staticmethod
+    def get_templates_with_filters(hie_source: Optional[str] = None,
+                                   source_type: Optional[str] = None,
+                                   template_name: Optional[str] = None) -> List[Dict]:
+        """
+        Retrieve templates with optional filters
+        
+        Args:
+            hie_source: Filter by HIE source
+            source_type: Filter by source type
+            template_name: Filter by template name
+            
+        Returns:
+            List of dictionaries with template data
+        """
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
                 
-                #Build OUTPUT clause
-                output_columns = ['id', 'name', 'description', 'template_type', 'version', 'is_active', 'created_at', 'updated_at']
-                if 'file_url' in available_columns:
-                    output_columns.append('file_url')
-                if 'created_by' in available_columns:
-                    output_columns.append('created_by')
-
+                # Build dynamic query
+                conditions = []
+                params = []
+                
+                if hie_source:
+                    conditions.append("HieSource = ?")
+                    params.append(hie_source)
+                
+                if source_type:
+                    conditions.append("SourceType = ?")
+                    params.append(source_type)
+                
+                if template_name:
+                    if not template_name.endswith('.liquid'):
+                        template_name = f"{template_name}.liquid"
+                    conditions.append("LiquidTemplate = ?")
+                    params.append(template_name)
+                
+                where_clause = " AND ".join(conditions) if conditions else "1=1"
+                
                 query = f"""
-                    INSERT INTO Templates ({', '.join(insert_columns)})
-                    OUTPUT {', '.join(['INSERTED.' + col for col in output_columns])}
-                    VALUES ({placeholders})
+                    SELECT Id, HieSource, SourceType, LiquidTemplate, AzureStoragePath
+                    FROM dbo.TemplateConfig
+                    WHERE {where_clause}
+                    ORDER BY Id DESC
                 """
                 
-                try:
-                    cursor.execute(query, insert_values)
-                    row = cursor.fetchone()
-                except pyodbc.Error as e:
-                    logger.error(f"Error inserting template: {e}")
-                    raise DatabaseException(f"Failed to create template: {str(e)}")
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
                 
-                template = dict(zip(output_columns, row))
-                template_id = template['id']
+                templates = []
+                for row in rows:
+                    templates.append({
+                        "id": row[0],
+                        "hie_source": row[1],
+                        "source_type": row[2],
+                        "template_name": row[3],
+                        "azure_storage_path": row[4]
+                    })
                 
-                # Add default values
-                template.setdefault('file_url', None)
-                template.setdefault('file_name', None)
-                template.setdefault('file_size', None)
-                template.setdefault('mime_type', None)
-                template.setdefault('created_by', user_id)
-                template.setdefault('last_used_at', None)
-                template.setdefault('usage_count', 0)
+                logger.info(f"Retrieved {len(templates)} template records with filters")
+                return templates
                 
-                # Add tags
-                tags = []
-                if 'tags' in template_data and template_data['tags']:
-                    try:
-                        cursor.execute("""
-                            SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-                            WHERE TABLE_NAME = 'TemplateTags'
-                        """)
-                        if cursor.fetchone()[0] > 0:
-                            for tag in template_data['tags']:
-                                try:
-                                    cursor.execute("""
-                                        INSERT INTO TemplateTags (template_id, tag_name)
-                                        VALUES (?, ?)
-                                    """, (template_id, tag.strip()))
-                                    tags.append(tag.strip())
-                                except pyodbc.Error as e:
-                                    logger.warning(f"Error adding tag '{tag}': {e}")
-                    except Exception as e:
-                        logger.warning(f"Error adding tags: {e}")
-                
-                try:
-                    conn.commit()
-                except pyodbc.Error as e:
-                    logger.error(f"Error committing transaction: {e}")
-                    raise DatabaseException("Failed to save template")
-                
-                template['tags'] = tags
-                logger.info(f"✅ Created template {template_id}")
-                return template
-                
-        except ConflictException:
-            raise
-        except ValidationException:
-            raise
-        except DatabaseException:
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error in create: {e}", exc_info=True)
-            raise DatabaseException(f"Failed to create template: {str(e)}")
-
+            logger.error(f"Error fetching templates with filters: {e}")
+            raise DatabaseException(f"Failed to fetch templates: {str(e)}")
+    
     @staticmethod
-    def update(template_id: int, template_data: dict):
-        """Update template - Full exception handling"""
+    def update_template_by_id(template_id: int, 
+                             hie_source: Optional[str] = None,
+                             source_type: Optional[str] = None) -> bool:
+        """
+        Update an existing template record by ID
+        
+        Args:
+            template_id: ID of the template to update
+            hie_source: Optional new HIE source
+            source_type: Optional new source type
+            
+        Returns:
+            True if successful
+        """
         try:
-            if template_id < 1:
-                raise ValidationException("Template ID must be positive")
-            
-            if not template_data:
-                raise ValidationException("No data provided for update")
-            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Check template exists
-                try:
-                    cursor.execute("SELECT id FROM Templates WHERE id = ?", (template_id,))
-                    if not cursor.fetchone():
-                        raise NotFoundException(f"Template with ID {template_id} not found")
-                except pyodbc.Error as e:
-                    logger.error(f"Error checking template existence: {e}")
-                    raise DatabaseException("Failed to verify template")
-                
-                # Check available columns
-                try:
-                    cursor.execute("""
-                        SELECT COLUMN_NAME 
-                        FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'Templates'
-                    """)
-                    available_columns = [row[0] for row in cursor.fetchall()]
-                except pyodbc.Error as e:
-                    logger.error(f"Error checking table schema: {e}")
-                    raise DatabaseException("Failed to verify table structure")
-                
+                # Build dynamic update query
                 update_fields = []
                 params = []
                 
-                column_mapping = {
-                    'name': 'name',
-                    'description': 'description',
-                    'template_type': 'template_type',
-                    'version': 'version',
-                    'is_active': 'is_active',
-                    'file_url': 'file_url',
-                    'file_name': 'file_name',
-                    'file_size': 'file_size',
-                    'mime_type': 'mime_type'
-                }
+                if hie_source:
+                    update_fields.append("HieSource = ?")
+                    params.append(hie_source)
                 
-                for key, column in column_mapping.items():
-                    if key in template_data and column in available_columns:
-                        update_fields.append(f"{column} = ?")
-                        params.append(template_data[key])
+                if source_type:
+                    update_fields.append("SourceType = ?")
+                    params.append(source_type)
                 
                 if not update_fields:
-                    raise ValidationException("No valid fields to update")
-                
-                if 'updated_at' in available_columns:
-                    update_fields.append("updated_at = GETDATE()")
+                    logger.warning("No fields to update")
+                    return True
                 
                 params.append(template_id)
                 
-                try:
-                    cursor.execute(f"""
-                        UPDATE Templates 
-                        SET {', '.join(update_fields)}
-                        WHERE id = ?
-                    """, params)
-                    
-                    if cursor.rowcount == 0:
-                        raise NotFoundException(f"Template with ID {template_id} not found")
-                    
-                    conn.commit()
-                except pyodbc.Error as e:
-                    logger.error(f"Error updating template: {e}")
-                    raise DatabaseException(f"Failed to update template: {str(e)}")
+                query = f"""
+                    UPDATE dbo.TemplateConfig
+                    SET {', '.join(update_fields)}
+                    WHERE Id = ?
+                """
                 
-                logger.info(f"✅ Updated template {template_id}")
-                return TemplateRepository.get_by_id(template_id)
+                cursor.execute(query, params)
+                conn.commit()
                 
-        except NotFoundException:
-            raise
-        except ValidationException:
-            raise
+                if cursor.rowcount == 0:
+                    logger.warning(f"No template found with ID: {template_id}")
+                    raise DatabaseException(f"Template with ID {template_id} not found")
+                
+                logger.info(f"Updated template ID: {template_id}")
+                return True
+                
         except DatabaseException:
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in update: {e}", exc_info=True)
+            logger.error(f"Error updating template: {e}")
             raise DatabaseException(f"Failed to update template: {str(e)}")
-
+    
     @staticmethod
-    def delete(template_id: int):
-        """Delete template - Full exception handling"""
-        try:
-            if template_id < 1:
-                raise ValidationException("Template ID must be positive")
+    def delete_template_by_id(template_id: int) -> bool:
+        """
+        Delete a template record by ID
+        
+        Args:
+            template_id: ID of the template to delete
             
+        Returns:
+            True if successful
+        """
+        try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                try:
-                    cursor.execute("DELETE FROM Templates WHERE id = ?", (template_id,))
-                    
-                    if cursor.rowcount == 0:
-                        raise NotFoundException(f"Template with ID {template_id} not found")
-                    
-                    conn.commit()
-                except pyodbc.Error as e:
-                    logger.error(f"Error deleting template: {e}")
-                    raise DatabaseException(f"Failed to delete template: {str(e)}")
+                query = """
+                    DELETE FROM dbo.TemplateConfig
+                    WHERE Id = ?
+                """
                 
-                logger.info(f"✅ Deleted template {template_id}")
+                cursor.execute(query, (template_id,))
+                conn.commit()
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"No template found with ID: {template_id}")
+                    raise DatabaseException(f"Template with ID {template_id} not found")
+                
+                logger.info(f"Deleted template ID: {template_id}")
                 return True
                 
-        except NotFoundException:
-            raise
-        except ValidationException:
-            raise
         except DatabaseException:
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in delete: {e}", exc_info=True)
+            logger.error(f"Error deleting template: {e}")
             raise DatabaseException(f"Failed to delete template: {str(e)}")
+        
+    @staticmethod
+    def check_duplicate_template(liquid_template: str, hie_source: str, source_type: str) -> bool:
+        """
+        Check if a template with the same name, hie_source, and source_type already exists
+        
+        Returns:
+            True if duplicate exists, False otherwise
+        """
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT COUNT(*) 
+                    FROM dbo.TemplateConfig
+                    WHERE LiquidTemplate = ? AND HieSource = ? AND SourceType = ?
+                """
+                
+                cursor.execute(query, (liquid_template, hie_source, source_type))
+                count = cursor.fetchone()[0]
+                
+                return count > 0
+                
+        except Exception as e:
+            logger.error(f"Error checking duplicate template: {e}")
+            raise DatabaseException(f"Failed to check duplicate: {str(e)}")
+        
+    @staticmethod
+    def delete_templates_by_name(template_name: str, hie_source: Optional[str] = None, 
+                                source_type: Optional[str] = None) -> List[Dict]:
+        """
+        Delete all templates with the same name (cascade delete)
+        
+        Args:
+            template_name: Name of the template
+            hie_source: Optional filter by HIE source
+            source_type: Optional filter by source type
+            
+        Returns:
+            List of deleted template records
+        """
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # First, get all matching templates
+                conditions = ["LiquidTemplate = ?"]
+                params = [template_name]
+                
+                if hie_source:
+                    conditions.append("HieSource = ?")
+                    params.append(hie_source)
+                
+                if source_type:
+                    conditions.append("SourceType = ?")
+                    params.append(source_type)
+                
+                where_clause = " AND ".join(conditions)
+                
+                # Get templates before deletion
+                select_query = f"""
+                    SELECT Id, HieSource, SourceType, LiquidTemplate, AzureStoragePath
+                    FROM dbo.TemplateConfig
+                    WHERE {where_clause}
+                """
+                
+                cursor.execute(select_query, params)
+                rows = cursor.fetchall()
+                
+                deleted_templates = []
+                for row in rows:
+                    deleted_templates.append({
+                        "id": row[0],
+                        "hie_source": row[1],
+                        "source_type": row[2],
+                        "template_name": row[3],
+                        "azure_storage_path": row[4]
+                    })
+                
+                if not deleted_templates:
+                    raise DatabaseException(f"No templates found with name: {template_name}")
+                
+                # Delete all matching templates
+                delete_query = f"""
+                    DELETE FROM dbo.TemplateConfig
+                    WHERE {where_clause}
+                """
+                
+                cursor.execute(delete_query, params)
+                conn.commit()
+                
+                logger.info(f"Cascade deleted {len(deleted_templates)} templates with name: {template_name}")
+                return deleted_templates
+                
+        except DatabaseException:
+            raise
+        except Exception as e:
+            logger.error(f"Error cascade deleting templates: {e}")
+            raise DatabaseException(f"Failed to cascade delete templates: {str(e)}")

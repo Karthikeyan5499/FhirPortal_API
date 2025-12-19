@@ -1,3 +1,4 @@
+#database.py
 import pyodbc
 from config import settings
 from contextlib import contextmanager
@@ -62,7 +63,7 @@ def test_connection():
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT GETDATE() as current_time")
+            cursor.execute("SELECT GETDATE() AS [current_time]")
             result = cursor.fetchone()
             logger.info(f"✅ Azure SQL Database connection test successful. Server time: {result[0]}")
             return True

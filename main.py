@@ -1,14 +1,13 @@
+#main.py 
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
+from pydantic import BaseModel
+from sas_service import generate_upload_sas
 
 # Import routers
 from api.template_management.controller import router as template_router
-from api.hie_config_management.controller import router as hie_router
-from api.ruleset_management.controller import router as ruleset_router
-from api.workflow_management.controller import router as workflow_router
-from api.fga_access_control.controller import router as fga_router
 from auth.auth_handler import router as auth_router
 
 # Import database and storage test functions
@@ -19,11 +18,10 @@ from api.template_management.blob_service import AzureBlobStorageService
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('fhir_portal_api.log')
-    ]
+    # Add an encoding to the stream handler to fix the emoji issue
+    encoding='utf-8', 
 )
+
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
@@ -74,6 +72,7 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
+
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
@@ -86,10 +85,6 @@ app.add_middleware(
 # Include routers
 app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(template_router, prefix="/api/template-management", tags=["Template Management"])
-app.include_router(hie_router, prefix="/api/hie-config", tags=["HIE Config Management"])
-app.include_router(ruleset_router, prefix="/api/ruleset", tags=["Ruleset Management"])
-app.include_router(workflow_router, prefix="/api/workflow", tags=["Workflow Management"])
-app.include_router(fga_router, prefix="/api/fga", tags=["Fine-Grain Access Control"])
 
 @app.get("/", tags=["Root"])
 async def root():
@@ -160,6 +155,61 @@ async def storage_health():
             return {"status": "unhealthy", "message": "Azure Blob Storage connection failed"}
     except Exception as e:
         return {"status": "unhealthy", "message": f"Error: {str(e)}"}
+
+class SasRequest(BaseModel):
+    file_name: str
+    container_type: str = "liquid"  # ADD THIS - default to 'liquid'
+
+@app.post("/get-upload-sas", tags=["Storage"])
+def get_upload_sas(request: SasRequest):
+    """
+    Generate a SAS URL for uploading a file to Azure Blob Storage
+    
+    Args:
+        request: SasRequest containing file_name and container_type
+            - file_name: Name of the file to upload
+            - container_type: 'liquid' for templates, 'input' for input files
+    
+    Returns:
+        dict: Contains the uploadUrl with SAS token
+    
+    Examples:
+        Request for liquid template:
+        {
+            "file_name": "patient.liquid",
+            "container_type": "liquid"
+        }
+        
+        Request for input file:
+        {
+            "file_name": "sample.hl7",
+            "container_type": "input"
+        }
+    """
+    try:
+        upload_url = generate_upload_sas(
+            request.file_name, 
+            container_type=request.container_type
+        )
+        return {
+            "uploadUrl": upload_url,
+            "fileName": request.file_name,
+            "containerType": request.container_type,
+            "expiresIn": "15 minutes"
+        }
+    except ValueError as ve:
+        logger.error(f"Configuration error: {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(ve)
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate upload SAS: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate upload URL: {str(e)}"
+        )
+
 
 if __name__ == "__main__":
     import uvicorn
