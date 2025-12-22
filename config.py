@@ -1,6 +1,8 @@
-#config.py
 from pydantic_settings import BaseSettings
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # Azure SQL Database
@@ -13,12 +15,10 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     AZURE_STORAGE_ACCOUNT_NAME: str
     AZURE_STORAGE_ACCOUNT_KEY: str
-    AZURE_STORAGE_CONTAINER: str
+    AZURE_STORAGE_CONTAINER_LIQUID: str
+    AZURE_STORAGE_CONTAINER_INPUT: str  # NEW
     AZURE_STORAGE_CONNECTION_STRING: str
-    AZURE_CONTAINER_NAME: str
 
-    AZURE_STORAGE_CONTAINER_LIQUID: Optional[str] = None
-    AZURE_STORAGE_CONTAINER_INPUT: Optional[str] = None
     # JWT
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
@@ -31,17 +31,13 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
-
     @property
     def BLOB_CONNECTION_STRING(self) -> str:
-        """Get blob connection string (prioritize connection string over individual parts)"""
-        
-        # PRIORITY 1: Use direct connection string if available
+        """Get blob connection string"""
         if self.AZURE_STORAGE_CONNECTION_STRING:
             logger.info("✅ Using AZURE_STORAGE_CONNECTION_STRING from .env")
             return self.AZURE_STORAGE_CONNECTION_STRING
         
-        # PRIORITY 2: Build from account name + key
         if self.AZURE_STORAGE_ACCOUNT_NAME and self.AZURE_STORAGE_ACCOUNT_KEY:
             logger.info("⚠️ Building connection string from account name + key")
             return (
@@ -52,14 +48,14 @@ class Settings(BaseSettings):
             )
         
         raise ValueError("❌ No blob storage credentials found in .env")
-    
+
     def get_liquid_container(self) -> str:
         """Get liquid templates container name"""
-        return self.AZURE_STORAGE_CONTAINER_LIQUID or "liquid-templates"
-    
+        return self.AZURE_STORAGE_CONTAINER_LIQUID
+
     def get_input_container(self) -> str:
         """Get input files container name"""
-        return self.AZURE_STORAGE_CONTAINER_INPUT or "input-files"
+        return self.AZURE_STORAGE_CONTAINER_INPUT
         
     class Config:
         env_file = ".env"

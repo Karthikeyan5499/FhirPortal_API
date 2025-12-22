@@ -1,21 +1,27 @@
-# sas_service.py - UPDATED VERSION
+# sas_service.py - Container-Level SAS Token Generation
 import os
 from datetime import datetime, timedelta, timezone
-from azure.storage.blob import generate_blob_sas, BlobSasPermissions
+from azure.storage.blob import (
+    generate_container_sas, 
+    ContainerSasPermissions
+)
 import logging
+from dotenv import load_dotenv 
+from typing import Literal
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 def get_storage_credentials():
-    """
-    Extract storage account name and key from environment
-    Supports both connection string and individual credentials
-    """
+    """Extract storage account name and key from environment"""
+    load_dotenv(override=True)
+    
     # Try connection string first
     connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     
     if connection_string:
-        # Parse connection string
+        logger.info(f"Found AZURE_STORAGE_CONNECTION_STRING: {connection_string[:50]}...")
         parts = {}
         for part in connection_string.split(';'):
             if '=' in part:
@@ -26,16 +32,32 @@ def get_storage_credentials():
         account_key = parts.get('AccountKey')
         
         if account_name and account_key:
-            logger.info("✅ Using credentials from AZURE_STORAGE_CONNECTION_STRING")
+            logger.info(f"✅ Using credentials from AZURE_STORAGE_CONNECTION_STRING")
+            logger.info(f"   Account Name: {account_name}")
             return account_name, account_key
+        else:
+            logger.warning(f"Connection string found but missing AccountName or AccountKey")
+    else:
+        logger.warning("AZURE_STORAGE_CONNECTION_STRING not found in environment")
     
     # Fallback to individual env vars
     account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     account_key = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
     
     if account_name and account_key:
-        logger.info("✅ Using credentials from AZURE_STORAGE_ACCOUNT_NAME and KEY")
+        logger.info(f"✅ Using credentials from AZURE_STORAGE_ACCOUNT_NAME and KEY")
+        logger.info(f"   Account Name: {account_name}")
         return account_name, account_key
+    else:
+        logger.error("AZURE_STORAGE_ACCOUNT_NAME or AZURE_STORAGE_ACCOUNT_KEY not found")
+    
+    # Debug: Print all environment variables that start with AZURE
+    logger.error("Available AZURE environment variables:")
+    for key in os.environ.keys():
+        if key.startswith('AZURE'):
+            value = os.environ[key]
+            masked_value = value[:20] + "..." if len(value) > 20 else value
+            logger.error(f"   {key} = {masked_value}")
     
     raise ValueError(
         "Azure Storage credentials not found. "
@@ -43,154 +65,107 @@ def get_storage_credentials():
         "(AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY)"
     )
 
-def get_container_name(container_type: str = "liquid") -> str:
-    """
-    Get container name based on type
-    
-    Args:
-        container_type: 'liquid' or 'input'
-    
-    Returns:
-        Container name
-    """
-    if container_type == "liquid":
-        container = os.getenv("AZURE_STORAGE_CONTAINER_LIQUID")
-        if not container:
-            raise ValueError("AZURE_STORAGE_CONTAINER_LIQUID not set in .env")
-        return container
-    
-    elif container_type == "input":
-        container = os.getenv("AZURE_STORAGE_CONTAINER_INPUT")
-        if not container:
-            raise ValueError("AZURE_STORAGE_CONTAINER_INPUT not set in .env")
-        return container
-    
-    else:
-        raise ValueError(f"Invalid container_type: {container_type}. Must be 'liquid' or 'input'")
 
-def validate_azure_config(container_type: str = "liquid"):
+def validate_azure_config(container_type: Literal[ "input"] = "input"):
     """
-    Validate that all required Azure Storage environment variables are set
+    Validate Azure Storage configuration for specific container type
     
     Args:
-        container_type: 'liquid' or 'input'
-    
-    Raises:
-        ValueError: If required config is missing
+        container_type: Type of container ("input")
     """
     try:
         account_name, account_key = get_storage_credentials()
-        container_name = get_container_name(container_type)
         
-        logger.info(f"✅ Config validated for container type: {container_type}")
+        if container_type == "input":
+            container_name = os.getenv("AZURE_STORAGE_CONTAINER_INPUT")
+            if not container_name:
+                raise ValueError("AZURE_STORAGE_CONTAINER_INPUT not set in .env")
+        else:
+            raise ValueError(f"Invalid container type: {container_type}")
+        
+        logger.info(f"✅ Config validated for {container_type} container: {container_name}")
         return account_name, account_key, container_name
-    
     except ValueError as e:
         logger.error(f"❌ Configuration validation failed: {e}")
         raise
 
-def generate_upload_sas(blob_name: str, container_type: str = "liquid", expiry_minutes: int = 15) -> str:
+
+def generate_upload_sas(
+    container_type: Literal["input"] = "input",
+    expiry_minutes: int = 15
+) -> str:
     """
-    Generates a write-only SAS URL for a single blob
+    Generate a SAS URL for entire container (no specific blob path)
     
     Args:
-        blob_name: Name of the blob to upload
-        container_type: 'liquid' for templates, 'input' for input files (default: 'liquid')
-        expiry_minutes: Minutes until the SAS token expires (default: 15)
+        container_type: Container type ("liquid" or "input")
+        expiry_minutes: Minutes until SAS token expires (default: 15)
     
     Returns:
-        str: Complete upload URL with SAS token
-    
-    Raises:
-        ValueError: If Azure Storage configuration is missing
-        Exception: If SAS token generation fails
-    
-    Example:
-        >>> generate_upload_sas("patient.liquid", "liquid", 15)
-        'https://account.blob.core.windows.net/liquid-templates/patient.liquid?sv=...'
+        str: Container URL with SAS token
         
-        >>> generate_upload_sas("sample.hl7", "input", 15)
-        'https://account.blob.core.windows.net/input-files/sample.hl7?sv=...'
+    Example:
+        >>> generate_upload_sas("liquid")
+        'https://account.blob.core.windows.net/liquid-templates?sv=2023-01-03&ss=b...'
     """
     try:
-        # Validate configuration and get credentials
         account_name, account_key, container_name = validate_azure_config(container_type)
         
-        # Generate SAS token with create and write permissions
-        sas_token = generate_blob_sas(
+        # Generate CONTAINER SAS token (covers entire container)
+        sas_token = generate_container_sas(
             account_name=account_name,
             container_name=container_name,
-            blob_name=blob_name,
             account_key=account_key,
-            permission=BlobSasPermissions(create=True, write=True),
+            permission=ContainerSasPermissions(
+                read=True,
+                write=True,
+                delete=False,
+                list=True
+            ),
             expiry=datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)
         )
 
-        # Construct the full upload URL
-        upload_url = (
+        # Construct container-level URL
+        container_url = (
             f"https://{account_name}.blob.core.windows.net/"
-            f"{container_name}/{blob_name}?{sas_token}"
+            f"{container_name}?{sas_token}"
         )
         
         logger.info(
-            f"Generated upload SAS URL for blob: {blob_name} "
-            f"in container: {container_name} (expires in {expiry_minutes} minutes)"
+            f"Generated container SAS URL for {container_type} container: {container_name} "
+            f"(expires in {expiry_minutes} minutes, permissions: read, write, list)"
         )
-        return upload_url
+        return container_url
     
     except ValueError as ve:
         logger.error(f"Configuration error: {ve}")
         raise
     except Exception as e:
-        logger.error(f"Failed to generate SAS token for {blob_name}: {e}")
-        raise Exception(f"SAS token generation failed: {str(e)}")
+        logger.error(f"Failed to generate container SAS token: {e}")
+        raise Exception(f"Container SAS token generation failed: {str(e)}")
 
 
-def generate_read_sas(blob_name: str, container_type: str = "liquid", expiry_minutes: int = 60) -> str:
+def test_sas_generation():
     """
-    Generates a read-only SAS URL for a single blob
-    
-    Args:
-        blob_name: Name of the blob to read
-        container_type: 'liquid' for templates, 'input' for input files (default: 'liquid')
-        expiry_minutes: Minutes until the SAS token expires (default: 60)
-    
-    Returns:
-        str: Complete read URL with SAS token
-    
-    Example:
-        >>> generate_read_sas("patient.liquid", "liquid", 60)
-        'https://account.blob.core.windows.net/liquid-templates/patient.liquid?sv=...'
+    Test SAS token generation for both containers
+    Returns: dict with test results for each container
     """
+    results = {}
+    
+    # Test input container
     try:
-        # Validate configuration and get credentials
-        account_name, account_key, container_name = validate_azure_config(container_type)
+        account_name, account_key, input_container = validate_azure_config("input")
+        container_url = generate_upload_sas("input", expiry_minutes=5)
         
-        # Generate SAS token with read permission
-        sas_token = generate_blob_sas(
-            account_name=account_name,
-            container_name=container_name,
-            blob_name=blob_name,
-            account_key=account_key,
-            permission=BlobSasPermissions(read=True),
-            expiry=datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)
-        )
-
-        # Construct the full read URL
-        read_url = (
-            f"https://{account_name}.blob.core.windows.net/"
-            f"{container_name}/{blob_name}?{sas_token}"
-        )
-        
-        logger.info(
-            f"Generated read SAS URL for blob: {blob_name} "
-            f"in container: {container_name} (expires in {expiry_minutes} minutes)"
-        )
-        return read_url
-    
-    except ValueError as ve:
-        logger.error(f"Configuration error: {ve}")
-        raise
+        results["input"] = {
+            "status": "success",
+            "account_name": account_name,
+            "container": input_container,
+            "container_sas": "generated" if container_url else "failed"
+        }
+        logger.info("✅ Input container SAS test successful")
     except Exception as e:
-        logger.error(f"Failed to generate read SAS token for {blob_name}: {e}")
-        raise Exception(f"Read SAS token generation failed: {str(e)}")
+        results["input"] = {"status": "failed", "error": str(e)}
+        logger.error(f"❌ Input container SAS test failed: {e}")
+    
+    return results
