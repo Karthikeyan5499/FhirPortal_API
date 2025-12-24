@@ -58,3 +58,7 @@ class TimeoutException(BaseAPIException):
     """Operation timeout exceptions"""
     def __init__(self, detail: str):
         super().__init__(detail=f"Operation timeout: {detail}", status_code=status.HTTP_504_GATEWAY_TIMEOUT)
+
+class DatabaseException(Exception):
+    """Custom exception for database errors"""
+    pass

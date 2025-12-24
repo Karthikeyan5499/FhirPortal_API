@@ -9,6 +9,7 @@ from sas_service import generate_upload_sas, test_sas_generation
 
 # Import routers
 from api.template_management.controller import router as template_router
+from api.workflow_management.controller import router as workflow_router
 from auth.auth_handler import router as auth_router
 
 # Import database and storage test functions
@@ -17,6 +18,7 @@ from api.template_management.blob_service import AzureBlobStorageService
 
 import uvicorn
 from config import settings
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -105,6 +107,7 @@ app.add_middleware(
 # Include routers
 app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(template_router, prefix="/api/template-management", tags=["Template Management"])
+app.include_router(workflow_router, prefix="/api/workflow-management", tags=["Workflow Management"]) 
 
 @app.get("/", tags=["Root"])
 async def root():
